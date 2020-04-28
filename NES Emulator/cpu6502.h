@@ -29,12 +29,22 @@ public:
 	uint8_t a = 0x00;	// Accumulator Register
 	uint8_t x = 0x00;	// X Register
 	uint8_t y = 0x00;	// Y Register
-	uint8_t stkp = 0x00;	// Stack Pointer
+	uint8_t stkp = 0x00;	// Stack Pointer, S register
 	uint16_t pc = 0x00;		// Program Counter
 
 	// Stores flag states
 	uint8_t status = 0x00;	// Status Register
 
+
+	// Page where the stack lives
+	const uint16_t STACK_PAGE = 0x0100;
+
+	// When reset, this is the hardcoded address we look at to find where to set our PC
+	const uint16_t RESET_VECTOR = 0xFFFC;
+
+	// When an interrupt is triggered, we look at this address to find the new execution location of the PC
+	const uint16_t M_INTERRUPT_VECTOR = 0xFFFE;	// Maskable
+	const uint16_t NM_INTERRUPT_VECTOR = 0xFFFA;	// Non-maskable
 public: 
 	
 	/* Enums */
@@ -42,7 +52,7 @@ public:
 	enum FLAGS6502 
 	{
 		C = (1 << 0), // Carry Bit
-		Z = (1 << 1), // Zero
+		Z = (1 << 1), // Zero / Equal
 		I = (1 << 2), // Disable interrupts
 		D = (1 << 3), // Decimal mode
 		B = (1 << 4), // Break
@@ -109,7 +119,7 @@ private:
 	/* Member variables */
 
 	uint8_t fetched = 0x00;		// represents the working input value to the ALU
-	uint16_t temp = 0x0000;		// temp variable
+	//uint16_t temp = 0x0000;		// temp variable
 	uint16_t addr_abs = 0x0000;	// all memory addresses end up in here
 	uint16_t addr_rel = 0x00;	// offset used for computing relative addresses
 	uint8_t opcode = 0x00;		// the instruction byte

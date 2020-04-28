@@ -72,7 +72,7 @@ void cpu6502::clock()
 }
 
 
-/** ADDRESSING MODES **/
+#pragma region ADDRESSING MODES
 
 /* NON-INDEXED, NON-MEMORY MODES */
 
@@ -234,6 +234,8 @@ uint8_t cpu6502::IZY()
 	return uint8_t();
 }
 
+#pragma endregion
+
 /* OPCODE IMPLEMENTATIONS */
 
 #pragma region Arithmetic
@@ -328,22 +330,37 @@ uint8_t cpu6502::ORA()
 	return 1;
 }
 
-// Bitwise XOR
+// Bitwise OR
 uint8_t cpu6502::ORA()
 {
 	fetch();
 
-	// Perform AND operation
+	// Perform OR operation
+	a = a | fetched;
+
+	// Check for flags that may need to be set
+	SetFlag(N, a & 0x80);
+	SetFlag(Z, a == 0x00);
+
+	// OR may require an additional clock cycle if a page boundary is crossed
+	return 1;
+}
+
+// Bitwise XOR
+uint8_t cpu6502::EOR()
+{
+	fetch();
+
+	// Perform XOR operation
 	a = a ^ fetched;
 
 	// Check for flags that may need to be set
 	SetFlag(N, a & 0x80);
 	SetFlag(Z, a == 0x00);
 
-	// AND may require an additional clock cycle if a page boundary is crossed
+	// XOR may require an additional clock cycle if a page boundary is crossed
 	return 1;
 }
-
 
 
 // Arithmetic Shift Left
@@ -376,14 +393,15 @@ uint8_t cpu6502::LSR()
 {
 	fetch();
 
-	// Shift left by 1
+	// Shift right by 1
+	SetFlag(C, fetched & 0x0001);
+
 	uint16_t temp = fetched >> 1;
 
-	SetFlag(N, temp & 0x80);
-	SetFlag(Z, (temp & 0x00FF) == 0x00);
-	// Set Carry to the value of the most significant bit of the fetched byte 
-	SetFlag(C, temp & 0x0100);
+	SetFlag(N, temp & 0x0080);
+	SetFlag(Z, (temp & 0x00FF) == 0x0000);
 
+	// Set Carry to the value of the most significant bit of the fetched byte 
 	if (lookup[opcode].addrmode == &cpu6502::IMP)
 	{
 		a = temp & 0x00FF;
@@ -392,6 +410,45 @@ uint8_t cpu6502::LSR()
 	{
 		write(addr_abs, temp & 0x00FF);
 	}
+
+	return 0;
+}
+
+// rotate bits left
+uint8_t cpu6502::ROL()
+{
+	fetch();
+
+	uint16_t temp = (fetched << 1) | GetFlag(C);
+
+	SetFlag(C, temp & 0xFF00);
+	SetFlag(Z, (temp & 0x00FF) == 0);
+	SetFlag(N, temp & 0x0080);
+
+	if (lookup[opcode].addrmode == &cpu6502::IMP)
+		a = temp & 0x00FF;
+	else
+		write(addr_abs, temp & 0x00FF);
+
+	return 0;
+}
+
+// rotate bits right
+uint8_t cpu6502::ROR()
+{
+	fetch();
+
+	uint16_t temp = (fetched >> 1) | (GetFlag(C) << 7);
+	
+
+	SetFlag(C, fetched & 0x0001);
+	SetFlag(Z, (temp & 0x00FF) == 0);
+	SetFlag(N, temp & 0x0080);
+
+	if (lookup[opcode].addrmode == &cpu6502::IMP)
+		a = temp & 0x00FF;
+	else
+		write(addr_abs, temp & 0x00FF);
 
 	return 0;
 }
@@ -445,7 +502,7 @@ uint8_t cpu6502::BMI()
 }
 
 // Branch on overflow clear
-uint8_t cpu6502::BVS()
+uint8_t cpu6502::BVC()
 {
 	if (!GetFlag(V))
 	{
@@ -533,7 +590,7 @@ uint8_t cpu6502::BCS()
 }
 
 // Branch on not equal
-uint8_t cpu6502::BEQ()
+uint8_t cpu6502::BNE()
 {
 	if (!GetFlag(Z))
 	{
@@ -578,6 +635,210 @@ uint8_t cpu6502::BEQ()
 }
 #pragma endregion
 
+#pragma region Stack
+
+// In this implementation, the stack pointer always points to empty space on the stack
+
+// Push accumulator to stack
+uint8_t cpu6502::PHA()
+{
+	// 0x0100 represents the page the stack is hardcoded to live
+	write(STACK_PAGE + stkp, a);
+	stkp--;;
+	return 0;
+}
+
+// Push processor status to stack
+uint8_t cpu6502::PHP()
+{
+	write(STACK_PAGE + stkp, status);
+
+	stkp--;
+
+	return 0;
+}
+
+// Pop stack value to accumulator
+uint8_t cpu6502::PLA()
+{
+	stkp++;
+
+	// 0x0100 represents the page the stack is hardcoded to live
+	a = read(STACK_PAGE + stkp);
+
+	// Check for flags that may need to be set
+	SetFlag(N, a & 0x80);
+	SetFlag(Z, a == 0x00);
+
+	return 0;
+}
+
+// Pop process status into the cpu status flags
+uint8_t cpu6502::PLP()
+{
+	stkp++;
+
+	// 0x0100 represents the page the stack is hardcoded to live
+	status = read(STACK_PAGE + stkp);
+
+	SetFlag(U, 1);
+
+	return 0;
+}
+
+#pragma endregion
+
+#pragma region Reset and Interrupts
+
+// reset cpu to initial state
+void cpu6502::reset()
+{
+	a = 0;
+	x = 0;
+	y = 0;
+	stkp = 0xFD; //todo why is fd instead of ff?
+	status = 0x00 | U;
+	addr_rel = 0;
+	addr_abs = 0;
+	fetched = 0;
+
+	// when the 6502 is reset, it always looks at 0xFFFC to find the program start address
+	uint16_t low = read(RESET_VECTOR);
+	uint16_t high = read(RESET_VECTOR + 1);
+
+	// set the program counter to the address we read from 0xFFFC-0xFFFD
+	pc = (high << 8) | low;
+
+
+	cycles = 8;
+}
+
+// interrupt request
+void cpu6502::irq()
+{
+	if (GetFlag(I) == 0)
+	{
+		// write the program counter to the stack
+		// start with the high part
+		write(STACK_PAGE + stkp, (pc >> 8) & 0x00FF);
+		stkp--;
+		write(STACK_PAGE + stkp, pc & 0x00FF);
+		stkp--;
+
+		SetFlag(B, 0);
+		SetFlag(U, 1);
+		SetFlag(I, 1);
+
+		// write the cpu status to the stack
+		write(STACK_PAGE + stkp, status);
+		stkp--;
+
+		// read the interrupt memory location
+		pc = (read(M_INTERRUPT_VECTOR + 1) << 8) | read(M_INTERRUPT_VECTOR);
+
+		cycles = 7;
+	}
+}
+
+// non-maskable interrupt request
+void cpu6502::nmi()
+{
+	// write the program counter to the stack
+	// start with the high part
+	write(STACK_PAGE + stkp, (pc >> 8) & 0x00FF);
+	stkp--;
+	write(STACK_PAGE + stkp, pc & 0x00FF);
+	stkp--;
+
+	SetFlag(B, 0);
+	SetFlag(U, 1);
+	SetFlag(I, 1);
+
+	// write the cpu status to the stack
+	write(STACK_PAGE + stkp, status);
+	stkp--;
+
+	// read the interrupt memory location
+	pc = (read(NM_INTERRUPT_VECTOR + 1) << 8) | read(NM_INTERRUPT_VECTOR);
+
+	cycles = 8;
+}
+
+// Return the state of the cpu to what it was before the interrupt
+uint8_t cpu6502::RTI()
+{
+	// start off by popping the status off of the stack
+	stkp++;
+	status = read(STACK_PAGE + stkp);
+	status &= ~B;
+	status &= ~U;
+
+	// then read the low part of the program counter
+	stkp++;
+	uint8_t low = read(STACK_PAGE + stkp);
+
+	// then the high part of the program counter
+	stkp++;
+	uint8_t high = read(STACK_PAGE + stkp);
+
+	// now we can restore the program counter
+	pc = (high << 8) | low;
+
+	return 0;
+}
+
+// Return from subroutine
+uint8_t cpu6502::RTS()
+{
+	// then read the low part of the program counter
+	stkp++;
+	uint8_t low = read(STACK_PAGE + stkp);
+
+	// then the high part of the program counter
+	stkp++;
+	uint8_t high = read(STACK_PAGE + stkp);
+
+	// now we can restore the program counter
+	pc = (high << 8) | low;
+
+	pc++;
+
+	return 0;
+}
+
+// break, interrupt coming from program
+uint8_t cpu6502::BRK()
+{
+	pc++;
+
+	SetFlag(I, true);
+
+	// write the high part of the PC to the stack
+	write(STACK_PAGE + stkp, (pc >> 8) & 0x00FF);
+	stkp--;
+
+	// write the low part to the stack
+	write(STACK_PAGE + stkp, pc & 0x00FF);
+	stkp--;
+
+	// set the break flag to 1, this only shows in the status byte written to the stack (only happens with PHP and BRK according to the NESDEV wiki)
+	SetFlag(B, true);
+
+	// write the status to the stack
+	write(STACK_PAGE + stkp, status);
+
+	// set the break flag back to 0
+	SetFlag(B, false);
+
+	// read the low and high byte and combine them into a 16 bit word for the pc
+	pc = read(M_INTERRUPT_VECTOR) | (read(M_INTERRUPT_VECTOR + 1) << 8);
+}
+
+#pragma endregion
+
+#pragma region Flag Operations
+
+// Sets the Z flag as though the value in the address tested were ANDed with the accumulator. S and V match bits 7 and 6 at the fetched address
 uint8_t cpu6502::BIT()
 {
 	fetch();
@@ -587,5 +848,343 @@ uint8_t cpu6502::BIT()
 	SetFlag(Z, t == 0x00);
 	SetFlag(N, fetched & (1 << 7));
 	SetFlag(V, fetched & (1 << 6));
+	return 0;
+}
+
+// clear carry bit
+uint8_t cpu6502::CLC()
+{
+	SetFlag(C, false);
+	return 0;
+}
+
+// clear decimal bit
+uint8_t cpu6502::CLD()
+{
+	SetFlag(D, false);
+	return 0;
+}
+
+// clear interrupt disable bit
+uint8_t cpu6502::CLI()
+{
+	SetFlag(I, false);
+	return 0;
+}
+
+// clear overflow bit
+uint8_t cpu6502::CLV()
+{
+	SetFlag(V, false);
+	return 0;
+}
+
+// set carry flag
+uint8_t cpu6502::SEC()
+{
+	SetFlag(C, true);
+	return 0;
+}
+
+// set decimal flag
+uint8_t cpu6502::SED()
+{
+	SetFlag(D, true);
+	return 0;
+}
+
+// set interrupt disable flag
+uint8_t cpu6502::SEI()
+{
+	SetFlag(I, true);
+	return 0;
+}
+
+#pragma endregion
+
+
+// compare memory to accumulator, subtraction (a - m)
+uint8_t cpu6502::CMP()
+{
+	fetch();
+
+	uint8_t temp = a - fetched;
+
+	SetFlag(N, a >= fetched);
+	SetFlag(Z, a == fetched);
+	SetFlag(C, temp & 0x80);
+
+	return 1;
+}
+
+// compare x register to memory
+uint8_t cpu6502::CPX()
+{
+	fetch();
+
+	uint8_t temp = x - fetched;
+
+	SetFlag(N, x >= fetched);
+	SetFlag(Z, x == fetched);
+	SetFlag(C, temp & 0x80);
+
+	return 1;
+}
+
+// compare y register to memory
+uint8_t cpu6502::CPY()
+{
+	fetch();
+
+	uint8_t temp = y - fetched;
+
+	SetFlag(N, y >= fetched);
+	SetFlag(Z, y == fetched);
+	SetFlag(C, temp & 0x80);
+
+	return 1;
+}
+
+// decrement memory, subtracts one from the value held at a specific memory location
+uint8_t cpu6502::DEC()
+{
+	fetch();
+	
+	uint8_t decremented = fetched - 1;
+
+	write(addr_abs, decremented);
+
+	SetFlag(N, decremented & 0x80);
+	SetFlag(Z, decremented == 0);
+
+	return 0;
+}
+
+// decrement the x register
+uint8_t cpu6502::DEX()
+{
+	--x;
+
+	SetFlag(N, x & 0x80);
+	SetFlag(Z, x == 0);
+
+	return 0;
+}
+
+// decrement the y register
+uint8_t cpu6502::DEY()
+{
+	--y;
+
+	SetFlag(N, y & 0x80);
+	SetFlag(Z, y == 0);
+
+	return 0;
+}
+
+// increment the data at memory location
+uint8_t cpu6502::INC()
+{
+	fetch();
+
+	uint8_t incremented = fetched + 1;
+
+	write(addr_abs, incremented);
+
+	SetFlag(N, incremented & 0x80);
+	SetFlag(Z, incremented == 0);
+
+	return 0;
+}
+
+// increment the x register
+uint8_t cpu6502::INX()
+{
+	++x;
+
+	SetFlag(N, x & 0x80);
+	SetFlag(Z, x == 0);
+
+	return 0;
+}
+
+// increment the y register
+uint8_t cpu6502::INY()
+{
+	++y;
+
+	SetFlag(N, y & 0x80);
+	SetFlag(Z, y == 0);
+
+	return 0;
+}
+
+// jump to address specified
+uint8_t cpu6502::JMP()
+{
+	pc = addr_abs;
+	return 0;
+}
+
+// jump to subroutine
+uint8_t cpu6502::JSR()
+{
+	--pc;
+
+	// write the high part of the pc to the stack
+	write(STACK_PAGE + stkp, (pc >> 8) & 0x00FF);
+	stkp--;
+
+	// write the low part of the pc to the stack
+	write(STACK_PAGE + stkp, pc & 0x00FF);
+	stkp--;
+
+	// this can only be called in absolute mode, so no need to fetch
+	pc = addr_abs;
+
+	return 0;
+
+}
+
+// load to accumulator
+uint8_t cpu6502::LDA()
+{
+	fetch();
+	a = fetched;
+
+	SetFlag(N, a & 0x80);
+	SetFlag(Z, a == 0);
+
+	return 1;
+}
+
+// load to x register
+uint8_t cpu6502::LDX()
+{
+	fetch();
+	x = fetched;
+
+	SetFlag(N, x & 0x80);
+	SetFlag(Z, x == 0);
+
+	return 1;
+}
+
+// load to y register
+uint8_t cpu6502::LDY()
+{
+	fetch();
+	y = fetched;
+
+	SetFlag(N, y & 0x80);
+	SetFlag(Z, y == 0);
+
+	return 1;
+}
+
+// no operation
+uint8_t cpu6502::NOP()
+{
+	// Many illegal op codes route to this one, and can cause different behavior
+	switch (opcode)
+	{
+	case 0x1C:
+	case 0x3C:
+	case 0x5C:
+	case 0x7C:
+	case 0xDC:
+	case 0xFC:
+		return 1;
+		break;
+	}
+	return 0;
+}
+
+// store the contents of the accumulator into memory
+uint8_t cpu6502::STA()
+{
+	write(addr_abs, a);
+	return 0;
+}
+
+// store the contents of the x register into memory
+uint8_t cpu6502::STX()
+{
+	write(addr_abs, x);
+	return 0;
+}
+
+// store the contents of the y register into memory
+uint8_t cpu6502::STY()
+{
+	write(addr_abs, y);
+	return 0;
+}
+
+// copies the contents of the accumulator into the x register
+uint8_t cpu6502::TAX()
+{
+	x = a;
+
+	SetFlag(N, x & 0x80);
+	SetFlag(Z, x == 0);
+
+	return 0;
+}
+
+// copies the contents of the accumulator into the y register
+uint8_t cpu6502::TAY()
+{
+	y = a;
+
+	SetFlag(N, y & 0x80);
+	SetFlag(Z, y == 0);
+
+	return 0;
+}
+
+// copy stack pointer into x register
+uint8_t cpu6502::TSX()
+{
+	x = stkp;
+
+	SetFlag(N, x & 0x80);
+	SetFlag(Z, x == 0);
+
+	return 0;
+}
+
+// copy the contents of the x register into the accumulator
+uint8_t cpu6502::TXA()
+{
+	a = x;
+
+	SetFlag(N, x & 0x80);
+	SetFlag(Z, x == 0);
+
+	return 0;
+}
+
+// transfer x to stack pointer
+uint8_t cpu6502::TXS()
+{
+	stkp = x;
+	return 0;
+}
+
+// transfer y into a
+uint8_t cpu6502::TYA()
+{
+	a = y;
+
+	SetFlag(N, a & 0x80);
+	SetFlag(Z, a == 0);
+
+	return 0;
+}
+
+// all illegal opcodes go here
+uint8_t cpu6502::XXX()
+{
 	return 0;
 }
